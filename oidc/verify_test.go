@@ -1,9 +1,12 @@
 package oidc
 
 import (
+	"context"
 	"crypto"
+	"crypto/sha256"
 	"encoding/base64"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -11,6 +14,8 @@ import (
 	"strconv"
 	"testing"
 	"time"
+
+	jose "github.com/go-jose/go-jose/v4"
 )
 
 func TestVerify(t *testing.T) {
@@ -284,6 +289,102 @@ func TestAccessTokenHash(t *testing.T) {
 			t.Errorf("invalid signature algo, want %q got %q", RS256, tok.sigAlgorithm)
 		}
 	})
+}
+
+// symmetricKeySet verifies JWTs signed with an HMAC (HS*) algorithm. The
+// built-in StaticKeySet only holds asymmetric public keys, so HMAC needs a
+// dedicated KeySet.
+type symmetricKeySet struct {
+	alg jose.SignatureAlgorithm
+	key []byte
+}
+
+func (s symmetricKeySet) VerifySignature(_ context.Context, jwt string) ([]byte, error) {
+	jws, err := jose.ParseSigned(jwt, []jose.SignatureAlgorithm{s.alg})
+	if err != nil {
+		return nil, fmt.Errorf("parsing jwt: %v", err)
+	}
+	return jws.Verify(s.key)
+}
+
+func signHS256(t *testing.T, key []byte, payload []byte) string {
+	t.Helper()
+	signer, err := jose.NewSigner(jose.SigningKey{Algorithm: jose.HS256, Key: key}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	jws, err := signer.Sign(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := jws.CompactSerialize()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return raw
+}
+
+// TestHMACAccessTokenHash guards the case where the signature check accepts an
+// HMAC-signed ID token. Its algorithm must also be usable for the at_hash
+// check rather than being reported as an unsupported signing algorithm.
+func TestHMACAccessTokenHash(t *testing.T) {
+	// go-jose requires an HMAC key of at least 32 bytes for HS256.
+	secret := []byte("0123456789abcdef0123456789abcdef")
+	accessToken := "ya29.hmac-access-token"
+
+	sum := sha256.Sum256([]byte(accessToken))
+	atHash := base64.RawURLEncoding.EncodeToString(sum[:len(sum)/2])
+
+	claims := `{"iss":"https://foo","aud":"client1","at_hash":"` + atHash + `"}`
+	rawIDToken := signHS256(t, secret, []byte(claims))
+
+	verifier := NewVerifier("https://foo", symmetricKeySet{jose.HS256, secret}, &Config{
+		ClientID:             "client1",
+		SkipExpiryCheck:      true,
+		SupportedSigningAlgs: []string{HS256},
+	})
+
+	tok, err := verifier.Verify(t.Context(), rawIDToken)
+	if err != nil {
+		t.Fatalf("verifying HMAC id token: %v", err)
+	}
+	if tok.sigAlgorithm != HS256 {
+		t.Fatalf("invalid signature algo, want %q got %q", HS256, tok.sigAlgorithm)
+	}
+	if err := tok.VerifyAccessToken(accessToken); err != nil {
+		t.Fatalf("VerifyAccessToken rejected a supported algorithm: %v", err)
+	}
+}
+
+// TestUnsignedAccessTokenHash ensures an unsigned ("none") ID token, which can
+// only be parsed when signature checks are skipped, is never accepted as the
+// basis for an access token hash check.
+func TestUnsignedAccessTokenHash(t *testing.T) {
+	vt := verificationTest{
+		name:    "unsigned token cannot anchor at_hash",
+		idToken: `{"iss":"https://foo","at_hash":"piwt8oCH-K2D9pXlaS1Y-w"}`,
+		config: Config{
+			SkipClientIDCheck:          true,
+			SkipExpiryCheck:            true,
+			InsecureSkipSignatureCheck: true,
+		},
+	}
+
+	tok, err := vt.runGetToken(t)
+	if err != nil {
+		t.Fatalf("parsing unsigned token: %v", err)
+	}
+	if tok.sigAlgorithm != "none" {
+		t.Fatalf("invalid signature algo, want %q got %q", "none", tok.sigAlgorithm)
+	}
+
+	err = tok.VerifyAccessToken("ya29.anything")
+	if err == nil {
+		t.Fatal("expected unsigned token to be rejected, got nil error")
+	}
+	if err.Error() != `oidc: unsupported signing algorithm "none"` {
+		t.Fatalf("bad error message, got %q", err.Error())
+	}
 }
 
 func TestDistributedClaims(t *testing.T) {

@@ -59,6 +59,41 @@ var (
 	errInvalidAtHash = errors.New("access token hash does not match value in ID token")
 )
 
+// accessTokenHashAlgs maps every JWS signing algorithm that this package can
+// verify to the hash function used to derive the at_hash claim, per
+// https://openid.net/specs/openid-connect-core-1_0.html#CodeIDToken.
+//
+// The table is keyed by the algorithm of a signature that has already been
+// verified, so it only contains real signing algorithms. The "none" algorithm
+// (and any empty algorithm name) is deliberately absent: an unsigned ID token
+// cannot prove its identity and must never be accepted as a valid basis for an
+// access token hash check.
+var accessTokenHashAlgs = map[string]func() hash.Hash{
+	RS256: sha256.New,
+	ES256: sha256.New,
+	PS256: sha256.New,
+	HS256: sha256.New,
+
+	RS384: sha512.New384,
+	ES384: sha512.New384,
+	PS384: sha512.New384,
+	HS384: sha512.New384,
+
+	RS512: sha512.New,
+	ES512: sha512.New,
+	PS512: sha512.New,
+	EdDSA: sha512.New,
+	HS512: sha512.New,
+}
+
+// accessTokenHasher returns the hash function for a verified signing algorithm.
+// It returns false for algorithms that are not backed by a verified signature,
+// including the "none" algorithm used by unsigned ID tokens.
+func accessTokenHasher(alg string) (func() hash.Hash, bool) {
+	newHash, ok := accessTokenHashAlgs[alg]
+	return newHash, ok
+}
+
 type contextKey int
 
 var issuerURLKey contextKey
@@ -583,17 +618,14 @@ func (i *IDToken) VerifyAccessToken(accessToken string) error {
 	if i.AccessTokenHash == "" {
 		return errNoAtHash
 	}
-	var h hash.Hash
-	switch i.sigAlgorithm {
-	case RS256, ES256, PS256:
-		h = sha256.New()
-	case RS384, ES384, PS384:
-		h = sha512.New384()
-	case RS512, ES512, PS512, EdDSA:
-		h = sha512.New()
-	default:
+	newHash, ok := accessTokenHasher(i.sigAlgorithm)
+	if !ok {
+		// This also rejects the "none" algorithm: an unsigned ID token may be
+		// parsed when signature checks are skipped, but it carries no verified
+		// signing algorithm and therefore cannot anchor an at_hash check.
 		return fmt.Errorf("oidc: unsupported signing algorithm %q", i.sigAlgorithm)
 	}
+	h := newHash()
 	h.Write([]byte(accessToken)) // hash documents that Write will never return an error
 	sum := h.Sum(nil)[:h.Size()/2]
 	actual := base64.RawURLEncoding.EncodeToString(sum)

@@ -104,10 +104,34 @@ func TestAccessTokenVerification(t *testing.T) {
 			assertNil,
 		},
 		{
+			"goodHS256",
+			newToken(HS256, googleAccessTokenHash),
+			googleAccessToken,
+			assertNil,
+		},
+		{
+			"goodHS384",
+			newToken(HS384, computed384TokenHash),
+			googleAccessToken,
+			assertNil,
+		},
+		{
+			"goodHS512",
+			newToken(HS512, computed512TokenHash),
+			googleAccessToken,
+			assertNil,
+		},
+		{
 			"badSignAlgo",
 			newToken("none", "xxx"),
 			googleAccessToken,
 			assertMsg(`oidc: unsupported signing algorithm "none"`),
+		},
+		{
+			"emptySignAlgo",
+			newToken("", "xxx"),
+			googleAccessToken,
+			assertMsg(`oidc: unsupported signing algorithm ""`),
 		},
 	}
 	for _, test := range tests {

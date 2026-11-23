@@ -16,6 +16,9 @@ const (
 	PS384 = "PS384" // RSASSA-PSS using SHA384 and MGF1-SHA384
 	PS512 = "PS512" // RSASSA-PSS using SHA512 and MGF1-SHA512
 	EdDSA = "EdDSA" // Ed25519 using SHA-512
+	HS256 = "HS256" // HMAC using SHA-256
+	HS384 = "HS384" // HMAC using SHA-384
+	HS512 = "HS512" // HMAC using SHA-512
 )
 
 var allAlgs = []jose.SignatureAlgorithm{
