@@ -1,6 +1,7 @@
 package oidc
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -67,22 +68,36 @@ func (l *LogoutToken) Claims(v any) error {
 	return json.Unmarshal(l.claims, v)
 }
 
+// logoutEvents represents the "events" claim of a logout token. The
+// backchannel-logout event is its only member and is required.
+type logoutEvents struct {
+	BackChannelLogout json.RawMessage `json:"http://schemas.openid.net/event/backchannel-logout"`
+}
+
 // https://openid.net/specs/openid-connect-backchannel-1_0.html#LogoutToken
 type logoutTokenJSON struct {
-	Issuer   string   `json:"iss"`
-	Subject  string   `json:"sub"`
-	Audience audience `json:"aud"`
-	Expiry   jsonTime `json:"exp"`
-	IssuedAt jsonTime `json:"iat"`
-	JTI      string   `json:"jti"`
-	Events   struct {
-		Logout json.RawMessage `json:"http://schemas.openid.net/event/backchannel-logout"`
-	}
-	SessionID string `json:"sid"`
+	Issuer    string       `json:"iss"`
+	Subject   string       `json:"sub"`
+	Audience  audience     `json:"aud"`
+	Expiry    jsonTime     `json:"exp"`
+	IssuedAt  jsonTime     `json:"iat"`
+	JTI       string       `json:"jti"`
+	Events    logoutEvents `json:"events"`
+	SessionID string       `json:"sid"`
 	// Nonce is parsed as a raw message so its mere presence can be detected.
 	// The spec requires logout tokens to not contain a nonce claim, regardless
 	// of its value.
 	Nonce json.RawMessage `json:"nonce"`
+}
+
+// claimPresent reports whether a JSON claim carries an actual value. A nil
+// [json.RawMessage] means the claim was omitted, while an explicit JSON null
+// unmarshals into the bytes "null"; both count as absent. Sharing this single
+// predicate keeps the required "events" check and the prohibited "nonce"
+// check consistent: the same null value can no longer satisfy one and fail
+// the other.
+func claimPresent(raw json.RawMessage) bool {
+	return len(raw) != 0 && !bytes.Equal(bytes.TrimSpace(raw), []byte("null"))
 }
 
 // VerifyLogout validates a back-channel logout token. Logout tokens are
@@ -126,13 +141,13 @@ func (v *IDTokenVerifier) VerifyLogout(ctx context.Context, rawLogoutToken strin
 		return nil, fmt.Errorf("oidc: parsing logout token payload: %v", err)
 	}
 
-	if len(logoutToken.Events.Logout) == 0 {
+	if !claimPresent(logoutToken.Events.BackChannelLogout) {
 		return nil, fmt.Errorf("oidc: logout token missing required http://schemas.openid.net/event/backchannel-logout event")
 	}
 
 	// A logout token MUST NOT contain a nonce claim. This prevents an ID token
 	// from being replayed as a logout token.
-	if len(logoutToken.Nonce) != 0 {
+	if claimPresent(logoutToken.Nonce) {
 		return nil, fmt.Errorf("oidc: logout token must not contain a 'nonce' claim")
 	}
 

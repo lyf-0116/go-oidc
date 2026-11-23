@@ -238,6 +238,23 @@ func TestLogoutToken(t *testing.T) {
 			wantErr: true,
 		},
 		{
+			name:    "null backchannel-logout event",
+			signKey: newRSAKey(t),
+			config:  Config{ClientID: testLogoutClientID},
+			// An explicit null does not satisfy the required event claim.
+			payload: `{
+				"iss": "https://login.example.com",
+				"sub": "user-1",
+				"aud": "test-client-id",
+				"iat": 1781724897,
+				"exp": 1781725017,
+				"jti": "jti-1",
+				"sid": "sid-1",
+				"events": {"http://schemas.openid.net/event/backchannel-logout": null}
+			}`,
+			wantErr: true,
+		},
+		{
 			name:    "missing jti",
 			signKey: newRSAKey(t),
 			config:  Config{ClientID: testLogoutClientID},
@@ -483,6 +500,33 @@ func TestLogoutToken(t *testing.T) {
 				"events": {"http://schemas.openid.net/event/backchannel-logout": {}}
 			}`,
 			wantErr: true,
+		},
+		{
+			name:    "null nonce",
+			signKey: newRSAKey(t),
+			config:  Config{ClientID: testLogoutClientID},
+			// An explicit null carries no nonce value and must be treated the
+			// same as an omitted "nonce" claim, not as a present nonce.
+			payload: `{
+				"iss": "https://login.example.com",
+				"sub": "user-1",
+				"aud": "test-client-id",
+				"iat": 1781724897,
+				"exp": 1781725017,
+				"jti": "jti-1",
+				"sid": "sid-1",
+				"nonce": null,
+				"events": {"http://schemas.openid.net/event/backchannel-logout": {}}
+			}`,
+			want: &LogoutToken{
+				Issuer:    testLogoutIssuer,
+				Subject:   "user-1",
+				Audience:  []string{testLogoutClientID},
+				IssuedAt:  time.Unix(testLogoutIAT, 0),
+				Expiry:    time.Unix(testLogoutExp, 0),
+				TokenID:   "jti-1",
+				SessionID: "sid-1",
+			},
 		},
 		{
 			name:    "malformed payload",
