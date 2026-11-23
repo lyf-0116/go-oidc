@@ -113,6 +113,9 @@ func TestLogoutToken(t *testing.T) {
 
 	tests := []struct {
 		name string
+		// The issuer the verifier is configured with. If empty, defaults to
+		// testLogoutIssuer.
+		issuer string
 		// The key used to sign the payload.
 		signKey *signingKey
 		// The keys the verifier trusts. If empty, defaults to signKey so that
@@ -124,6 +127,95 @@ func TestLogoutToken(t *testing.T) {
 		wantErr bool
 		want    *LogoutToken
 	}{
+		{
+			name:    "google accounts without scheme",
+			issuer:  "https://accounts.google.com",
+			signKey: newRSAKey(t),
+			config:  Config{ClientID: testLogoutClientID},
+			// Google historically omits the scheme from its issuer claim. The
+			// same relaxation applied to ID tokens applies to logout tokens.
+			payload: `{
+				"iss": "accounts.google.com",
+				"sub": "user-1",
+				"aud": "test-client-id",
+				"iat": 1781724897,
+				"exp": 1781725017,
+				"jti": "jti-1",
+				"sid": "sid-1",
+				"events": {"http://schemas.openid.net/event/backchannel-logout": {}}
+			}`,
+			want: &LogoutToken{
+				Issuer:    "accounts.google.com",
+				Subject:   "user-1",
+				Audience:  []string{testLogoutClientID},
+				IssuedAt:  time.Unix(testLogoutIAT, 0),
+				Expiry:    time.Unix(testLogoutExp, 0),
+				TokenID:   "jti-1",
+				SessionID: "sid-1",
+			},
+		},
+		{
+			name:    "non-google issuer without scheme",
+			signKey: newRSAKey(t),
+			config:  Config{ClientID: testLogoutClientID},
+			// The no-scheme relaxation is bound to the Google issuer constant
+			// and must not apply to any other issuer.
+			payload: `{
+				"iss": "login.example.com",
+				"sub": "user-1",
+				"aud": "test-client-id",
+				"iat": 1781724897,
+				"exp": 1781725017,
+				"jti": "jti-1",
+				"sid": "sid-1",
+				"events": {"http://schemas.openid.net/event/backchannel-logout": {}}
+			}`,
+			wantErr: true,
+		},
+		{
+			name:    "nbf in future",
+			signKey: newRSAKey(t),
+			config:  Config{ClientID: testLogoutClientID},
+			// nbf is an hour after the verifier's notion of "now"
+			// (testLogoutIAT), well beyond the clock skew tolerance.
+			payload: `{
+				"iss": "https://login.example.com",
+				"sub": "user-1",
+				"aud": "test-client-id",
+				"iat": 1781724897,
+				"exp": 1781725017,
+				"nbf": 1781728497,
+				"jti": "jti-1",
+				"sid": "sid-1",
+				"events": {"http://schemas.openid.net/event/backchannel-logout": {}}
+			}`,
+			wantErr: true,
+		},
+		{
+			name:    "nbf in past",
+			signKey: newRSAKey(t),
+			config:  Config{ClientID: testLogoutClientID},
+			payload: `{
+				"iss": "https://login.example.com",
+				"sub": "user-1",
+				"aud": "test-client-id",
+				"iat": 1781724897,
+				"exp": 1781725017,
+				"nbf": 1781721297,
+				"jti": "jti-1",
+				"sid": "sid-1",
+				"events": {"http://schemas.openid.net/event/backchannel-logout": {}}
+			}`,
+			want: &LogoutToken{
+				Issuer:    testLogoutIssuer,
+				Subject:   "user-1",
+				Audience:  []string{testLogoutClientID},
+				IssuedAt:  time.Unix(testLogoutIAT, 0),
+				Expiry:    time.Unix(testLogoutExp, 0),
+				TokenID:   "jti-1",
+				SessionID: "sid-1",
+			},
+		},
 		{
 			name:    "valid",
 			signKey: newRSAKey(t),
@@ -511,7 +603,11 @@ func TestLogoutToken(t *testing.T) {
 
 			token := tc.signKey.sign(t, []byte(tc.payload))
 			keySet := &StaticKeySet{PublicKeys: pubKeys}
-			v := NewVerifier(testLogoutIssuer, keySet, &config)
+			issuer := tc.issuer
+			if issuer == "" {
+				issuer = testLogoutIssuer
+			}
+			v := NewVerifier(issuer, keySet, &config)
 
 			got, err := v.VerifyLogout(t.Context(), token)
 			if err != nil {

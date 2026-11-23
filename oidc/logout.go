@@ -74,8 +74,11 @@ type logoutTokenJSON struct {
 	Audience audience `json:"aud"`
 	Expiry   jsonTime `json:"exp"`
 	IssuedAt jsonTime `json:"iat"`
-	JTI      string   `json:"jti"`
-	Events   struct {
+	// NotBefore is parsed so the shared time validation can reject tokens
+	// whose "nbf" claim is in the future.
+	NotBefore *jsonTime `json:"nbf"`
+	JTI       string    `json:"jti"`
+	Events    struct {
 		Logout json.RawMessage `json:"http://schemas.openid.net/event/backchannel-logout"`
 	}
 	SessionID string `json:"sid"`
@@ -158,8 +161,8 @@ func (v *IDTokenVerifier) VerifyLogout(ctx context.Context, rawLogoutToken strin
 		return nil, fmt.Errorf("oidc: logout token must contain a 'sub' claim, a 'sid' claim, or both")
 	}
 
-	if !v.config.SkipIssuerCheck && t.Issuer != v.issuer {
-		return nil, fmt.Errorf("oidc: logout token issued by a different provider, expected %q, got %q", v.issuer, t.Issuer)
+	if err := v.checkIssuer(t.Issuer); err != nil {
+		return nil, err
 	}
 
 	if !v.config.SkipClientIDCheck {
@@ -172,17 +175,9 @@ func (v *IDTokenVerifier) VerifyLogout(ctx context.Context, rawLogoutToken strin
 		}
 	}
 
-	// If a SkipExpiryCheck is false, make sure token is not expired.
-	if !v.config.SkipExpiryCheck {
-		now := time.Now
-		if v.config.Now != nil {
-			now = v.config.Now
-		}
-		nowTime := now()
-
-		if t.Expiry.Before(nowTime) {
-			return nil, &TokenExpiredError{Expiry: t.Expiry}
-		}
+	// Make sure the token is not expired and not yet valid.
+	if err := v.checkTime(t.Expiry, logoutToken.NotBefore); err != nil {
+		return nil, err
 	}
 	return t, nil
 }

@@ -73,6 +73,58 @@ func NewVerifier(issuerURL string, keySet KeySet, config *Config) *IDTokenVerifi
 	return &IDTokenVerifier{keySet: keySet, config: config, issuer: issuerURL}
 }
 
+// checkIssuer validates a token's "iss" claim against the verifier's issuer.
+// It is shared by ID token and logout token verification so both chains reach
+// the same conclusion for the same issuer.
+func (v *IDTokenVerifier) checkIssuer(issuer string) error {
+	if v.config.SkipIssuerCheck {
+		return nil
+	}
+	if issuer == v.issuer {
+		return nil
+	}
+	// Google sometimes returns "accounts.google.com" as the issuer claim instead of
+	// the required "https://accounts.google.com". Detect this case and allow it only
+	// for Google.
+	//
+	// We will not add hooks to let other providers go off spec like this.
+	if v.issuer == issuerGoogleAccounts && issuer == issuerGoogleAccountsNoScheme {
+		return nil
+	}
+	return fmt.Errorf("oidc: token issued by a different provider, expected %q got %q", v.issuer, issuer)
+}
+
+// checkTime validates a token's time-based claims: the token must not be
+// expired and, if a not-before ("nbf") claim is present, it must not be in
+// the future. It is shared by ID token and logout token verification.
+func (v *IDTokenVerifier) checkTime(expiry time.Time, notBefore *jsonTime) error {
+	if v.config.SkipExpiryCheck {
+		return nil
+	}
+	now := time.Now
+	if v.config.Now != nil {
+		now = v.config.Now
+	}
+	nowTime := now()
+
+	if expiry.Before(nowTime) {
+		return &TokenExpiredError{Expiry: expiry}
+	}
+
+	// If nbf claim is provided in token, ensure that it is indeed in the past.
+	if notBefore != nil {
+		nbfTime := time.Time(*notBefore)
+		// Set to 5 minutes since this is what other OpenID Connect providers do to deal with clock skew.
+		// https://github.com/AzureAD/azure-activedirectory-identitymodel-extensions-for-dotnet/blob/6.12.2/src/Microsoft.IdentityModel.Tokens/TokenValidationParameters.cs#L149-L153
+		leeway := 5 * time.Minute
+
+		if nowTime.Add(leeway).Before(nbfTime) {
+			return fmt.Errorf("oidc: current time %v before the nbf (not before) time: %v", nowTime, nbfTime)
+		}
+	}
+	return nil
+}
+
 // Config is the configuration for an IDTokenVerifier.
 type Config struct {
 	// Expected audience of the token. For a majority of the cases this is expected to be
@@ -234,15 +286,8 @@ func (v *IDTokenVerifier) Verify(ctx context.Context, rawIDToken string) (*IDTok
 	}
 
 	// Check issuer.
-	if !v.config.SkipIssuerCheck && t.Issuer != v.issuer {
-		// Google sometimes returns "accounts.google.com" as the issuer claim instead of
-		// the required "https://accounts.google.com". Detect this case and allow it only
-		// for Google.
-		//
-		// We will not add hooks to let other providers go off spec like this.
-		if !(v.issuer == issuerGoogleAccounts && t.Issuer == issuerGoogleAccountsNoScheme) {
-			return nil, fmt.Errorf("oidc: id token issued by a different provider, expected %q got %q", v.issuer, t.Issuer)
-		}
+	if err := v.checkIssuer(t.Issuer); err != nil {
+		return nil, err
 	}
 
 	// If a client ID has been provided, make sure it's part of the audience. SkipClientIDCheck must be true if ClientID is empty.
@@ -258,29 +303,9 @@ func (v *IDTokenVerifier) Verify(ctx context.Context, rawIDToken string) (*IDTok
 		}
 	}
 
-	// If a SkipExpiryCheck is false, make sure token is not expired.
-	if !v.config.SkipExpiryCheck {
-		now := time.Now
-		if v.config.Now != nil {
-			now = v.config.Now
-		}
-		nowTime := now()
-
-		if t.Expiry.Before(nowTime) {
-			return nil, &TokenExpiredError{Expiry: t.Expiry}
-		}
-
-		// If nbf claim is provided in token, ensure that it is indeed in the past.
-		if token.NotBefore != nil {
-			nbfTime := time.Time(*token.NotBefore)
-			// Set to 5 minutes since this is what other OpenID Connect providers do to deal with clock skew.
-			// https://github.com/AzureAD/azure-activedirectory-identitymodel-extensions-for-dotnet/blob/6.12.2/src/Microsoft.IdentityModel.Tokens/TokenValidationParameters.cs#L149-L153
-			leeway := 5 * time.Minute
-
-			if nowTime.Add(leeway).Before(nbfTime) {
-				return nil, fmt.Errorf("oidc: current time %v before the nbf (not before) time: %v", nowTime, nbfTime)
-			}
-		}
+	// Make sure the token is not expired and not yet valid.
+	if err := v.checkTime(t.Expiry, token.NotBefore); err != nil {
+		return nil, err
 	}
 
 	return t, nil
