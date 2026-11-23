@@ -462,8 +462,102 @@ func TestProviderConfigJSON(t *testing.T) {
 		JWKSURL:       "https://www.googleapis.com/oauth2/v3/certs",
 		Algorithms:    []string{"RS256"},
 	}
-	if !reflect.DeepEqual(config, want) {
+	// The raw document bytes are retained separately and must not change the
+	// config's public, JSON-serializable fields.
+	got := ProviderConfig{
+		IssuerURL:     config.IssuerURL,
+		AuthURL:       config.AuthURL,
+		TokenURL:      config.TokenURL,
+		DeviceAuthURL: config.DeviceAuthURL,
+		UserInfoURL:   config.UserInfoURL,
+		JWKSURL:       config.JWKSURL,
+		Algorithms:    config.Algorithms,
+	}
+	if !reflect.DeepEqual(got, *want) {
 		t.Errorf("Parsing provider config returned unexpected result, got=%#v, want=%#v", config, want)
+	}
+	if want := strings.TrimSpace(testCase); string(config.rawClaims) != want {
+		t.Errorf("Parsing provider config did not retain the original document, got=%q, want=%q",
+			config.rawClaims, want)
+	}
+
+	// Re-serializing the config must not leak the retained raw document.
+	gotJSON, err := json.Marshal(config)
+	if err != nil {
+		t.Fatalf("Marshaling provider config: %v", err)
+	}
+	var roundTripped ProviderConfig
+	if err := json.Unmarshal(gotJSON, &roundTripped); err != nil {
+		t.Fatalf("Re-parsing provider config: %v", err)
+	}
+	roundTrip := ProviderConfig{
+		IssuerURL:     roundTripped.IssuerURL,
+		AuthURL:       roundTripped.AuthURL,
+		TokenURL:      roundTripped.TokenURL,
+		DeviceAuthURL: roundTripped.DeviceAuthURL,
+		UserInfoURL:   roundTripped.UserInfoURL,
+		JWKSURL:       roundTripped.JWKSURL,
+		Algorithms:    roundTripped.Algorithms,
+	}
+	if !reflect.DeepEqual(roundTrip, *want) {
+		t.Errorf("Marshaling provider config returned unexpected result, got=%#v, want=%#v", roundTripped, want)
+	}
+}
+
+func TestProviderConfigNewProvider(t *testing.T) {
+	document := `{
+		"issuer": "https://example.com",
+		"authorization_endpoint": "https://example.com/auth",
+		"token_endpoint": "https://example.com/token",
+		"jwks_uri": "https://example.com/keys",
+		"id_token_signing_alg_values_supported": [
+			"RS256", "HS256", "none"
+		],
+		"scopes_supported": ["openid", "email"]
+	}`
+
+	config := &ProviderConfig{}
+	if err := json.Unmarshal([]byte(document), config); err != nil {
+		t.Fatalf("Parsing provider config: %v", err)
+	}
+
+	provider := config.NewProvider(context.Background())
+
+	if got, want := provider.algorithms, []string{"RS256"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("NewProvider() unexpected algorithms value, got=%s, want=%s", got, want)
+	}
+
+	var claims struct {
+		ScopesSupported []string `json:"scopes_supported"`
+	}
+	if err := provider.Claims(&claims); err != nil {
+		t.Fatalf("Provider.Claims() failed: %v", err)
+	}
+	if want := []string{"openid", "email"}; !reflect.DeepEqual(claims.ScopesSupported, want) {
+		t.Errorf("Provider.Claims() returned unexpected scopes, got=%s, want=%s",
+			claims.ScopesSupported, want)
+	}
+}
+
+func TestProviderConfigHandConstructedClaims(t *testing.T) {
+	// A config built without decoding a discovery document has no raw claims
+	// to expose through the resulting provider.
+	config := &ProviderConfig{
+		IssuerURL:  "https://example.com",
+		Algorithms: []string{"RS256", "HS256"},
+	}
+	provider := config.NewProvider(context.Background())
+
+	if got, want := provider.algorithms, []string{"RS256"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("NewProvider() unexpected algorithms value, got=%s, want=%s", got, want)
+	}
+	if provider.rawClaims != nil {
+		t.Errorf("NewProvider() retained raw claims for a hand-constructed config: %q", provider.rawClaims)
+	}
+
+	var claims map[string]any
+	if err := provider.Claims(&claims); err == nil {
+		t.Errorf("Provider.Claims() expected error for hand-constructed config, got=%v", claims)
 	}
 }
 

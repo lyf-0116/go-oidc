@@ -190,6 +190,20 @@ var supportedAlgorithms = map[string]bool{
 	EdDSA: true,
 }
 
+// filterAlgorithms returns the subset of the advertised algorithms that are
+// explicitly supported by this package. It is shared by both the discovery
+// and direct configuration paths so that unsupported algorithms such as
+// HS256 or "none" can never reach the IDTokenVerifier through either one.
+func filterAlgorithms(algorithms []string) []string {
+	var filtered []string
+	for _, algorithm := range algorithms {
+		if supportedAlgorithms[algorithm] {
+			filtered = append(filtered, algorithm)
+		}
+	}
+	return filtered
+}
+
 // ProviderConfig allows direct creation of a [Provider] from metadata
 // configuration. This is intended for interop with providers that don't support
 // discovery, or host the JSON discovery document at an off-spec path.
@@ -242,6 +256,30 @@ type ProviderConfig struct {
 	// ID tokens. If not provided, this defaults to the algorithms advertised by
 	// the JWK endpoint, then the set of algorithms supported by this package.
 	Algorithms []string `json:"id_token_signing_alg_values_supported"`
+
+	// rawClaims holds the original JSON document the config was decoded from,
+	// if any. It is populated by [ProviderConfig.UnmarshalJSON] and passed to
+	// the resulting [Provider] so [Provider.Claims] can expose fields not
+	// represented directly by this struct. It is never serialized.
+	rawClaims []byte
+}
+
+// providerConfigAlias mirrors ProviderConfig without its methods so the
+// custom unmarshaler below can delegate to the standard decoder without
+// recursing into itself.
+type providerConfigAlias ProviderConfig
+
+// UnmarshalJSON decodes the discovery document while retaining its original
+// bytes. Configs constructed by hand rather than decoded from a document have
+// no raw claims, in which case [Provider.Claims] returns an error.
+func (p *ProviderConfig) UnmarshalJSON(data []byte) error {
+	var alias providerConfigAlias
+	if err := json.Unmarshal(data, &alias); err != nil {
+		return err
+	}
+	*p = ProviderConfig(alias)
+	p.rawClaims = append(p.rawClaims[:0], data...)
+	return nil
 }
 
 // NewProvider initializes a provider from a set of endpoints, rather than
@@ -259,7 +297,8 @@ func (p *ProviderConfig) NewProvider(ctx context.Context) *Provider {
 		deviceAuthURL: p.DeviceAuthURL,
 		userInfoURL:   p.UserInfoURL,
 		jwksURL:       p.JWKSURL,
-		algorithms:    p.Algorithms,
+		algorithms:    filterAlgorithms(p.Algorithms),
+		rawClaims:     p.rawClaims,
 		client:        getClient(ctx),
 	}
 }
@@ -334,12 +373,6 @@ func NewProvider(ctx context.Context, issuer string) (*Provider, error) {
 			Discovered: p.Issuer,
 		}
 	}
-	var algs []string
-	for _, a := range p.Algorithms {
-		if supportedAlgorithms[a] {
-			algs = append(algs, a)
-		}
-	}
 	return &Provider{
 		issuer:        issuerURL,
 		authURL:       p.AuthURL,
@@ -347,7 +380,7 @@ func NewProvider(ctx context.Context, issuer string) (*Provider, error) {
 		deviceAuthURL: p.DeviceAuthURL,
 		userInfoURL:   p.UserInfoURL,
 		jwksURL:       p.JWKSURL,
-		algorithms:    algs,
+		algorithms:    filterAlgorithms(p.Algorithms),
 		rawClaims:     body,
 		client:        getClient(ctx),
 	}, nil
